@@ -67,13 +67,12 @@ jobs:
           mkdir -p ~/.ssh
           chmod 700 ~/.ssh
 
-          # Записываем ключи
-          echo "${CI_STARDUST_SSH_KEY}" > ~/.ssh/ci_stardust_key
-          echo "${CI_NEBULA_SSH_KEY}"   > ~/.ssh/ci_nebula_key
+          # Декодируем из base64
+          echo "${CI_STARDUST_SSH_KEY}" | base64 -d > ~/.ssh/ci_stardust_key
+          echo "${CI_NEBULA_SSH_KEY}"   | base64 -d > ~/.ssh/ci_nebula_key
           chmod 600 ~/.ssh/ci_stardust_key
           chmod 600 ~/.ssh/ci_nebula_key
 
-          # SSH config — разные хосты для разных ключей
           cat > ~/.ssh/config << 'EOF'
           Host github-stardust
             HostName github.com
@@ -91,6 +90,10 @@ jobs:
 
           ssh-keyscan github.com >> ~/.ssh/known_hosts
           chmod 644 ~/.ssh/known_hosts
+
+          # Проверяем что ключи валидны
+          ssh-keygen -l -f ~/.ssh/ci_stardust_key
+          ssh-keygen -l -f ~/.ssh/ci_nebula_key
 
           echo "✅ SSH keys configured"
 
