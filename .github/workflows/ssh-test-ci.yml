@@ -68,8 +68,8 @@ jobs:
           chmod 700 ~/.ssh
 
           # Декодируем из base64
-          echo "${CI_STARDUST_SSH_KEY}" | base64 -d > ~/.ssh/ci_stardust_key
-          echo "${CI_NEBULA_SSH_KEY}"   | base64 -d > ~/.ssh/ci_nebula_key
+          printf '%s' "${CI_STARDUST_SSH_KEY}" > ~/.ssh/ci_stardust_key
+          printf '%s' "${CI_NEBULA_SSH_KEY}" > ~/.ssh/ci_nebula_key
           chmod 600 ~/.ssh/ci_stardust_key
           chmod 600 ~/.ssh/ci_nebula_key
 
