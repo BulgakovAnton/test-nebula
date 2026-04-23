@@ -1,4 +1,4 @@
-name: CI / Writerside Tests
+name: CI / Writerside Tests ssh
 
 on:
   push:
@@ -73,6 +73,7 @@ jobs:
           chmod 600 ~/.ssh/ci_stardust_key
           chmod 600 ~/.ssh/ci_nebula_key
 
+          # SSH config — разные хосты для разных ключей
           cat > ~/.ssh/config << 'EOF'
           Host github-stardust
             HostName github.com
@@ -83,6 +84,15 @@ jobs:
           Host github-nebula
             HostName github.com
             User git
+            IdentityFile ~/.ssh/ci_nebula_key
+            IdentitiesOnly yes
+
+          # Для actions/checkout который использует github.com напрямую
+          # Определяем какой ключ использовать по текущему репо
+          Host github.com
+            HostName github.com
+            User git
+            IdentityFile ~/.ssh/ci_stardust_key
             IdentityFile ~/.ssh/ci_nebula_key
             IdentitiesOnly yes
           EOF
@@ -96,7 +106,6 @@ jobs:
       - name: Checkout current repository
         uses: actions/checkout@v4
         with:
-          ssh-key: ${{ steps.context.outputs.current_repo == env.STARDUST_REPO && secrets.CI_STARDUST_SSH_KEY || secrets.CI_NEBULA_SSH_KEY }}
           path: wrs/${{ steps.context.outputs.current_repo }}
           fetch-depth: 0
 
@@ -181,9 +190,9 @@ jobs:
       - name: Run tests
         shell: bash
         working-directory: wrs/${{ env.STARDUST_REPO }}
-#        env:
-#          GRADLE_OPTS: -Dorg.gradle.daemon=false
-#          ORG_GRADLE_PROJECT_spaceDownloadWRSFE: ${{ secrets.SPACE_DOWNLOAD_WRSFE }}
+        env:
+          GRADLE_OPTS: -Dorg.gradle.daemon=false
+          ORG_GRADLE_PROJECT_spaceDownloadWRSFE: ${{ secrets.SPACE_DOWNLOAD_WRSFE }}
         run: |
           set -euo pipefail
           ./gradlew test --stacktrace
