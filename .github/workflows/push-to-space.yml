@@ -17,7 +17,7 @@ jobs:
 
     env:
       SPACE_REMOTE_NAME: space
-      SPACE_REPO_URL: git@github.com:BulgakovAnton/space-stardust.git
+      SPACE_REPO_URL: git@github.com:BulgakovAnton/space-nebula.git
 
     steps:
       - name: Check actor is admin
