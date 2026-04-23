@@ -1,0 +1,167 @@
+name: CI / Writerside Tests
+
+on:
+  push:
+    branches:
+      - '**'
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.repository }}-${{ github.event.pull_request.number || github.ref_name }}
+  cancel-in-progress: true
+
+env:
+  JAVA_VERSION: '21'
+  MAIN_REPO_OWNER: BulgakovAnton   # ← заменить на реальный owner когда будем деплоить в borlander
+  STARDUST_REPO: test-stardust     # ← заменить на stardust
+  NEBULA_REPO: test-nebula         # ← заменить на nebula
+
+jobs:
+  tests:
+    name: Tests
+    runs-on: ubuntu-latest
+    # ubuntu-latest = 7GB RAM
+    # тесты требуют -Xmx5g + Gradle daemon -Xmx2G
+    # если не хватит памяти — заменить на ubuntu-latest-8-cores (16GB, платный)
+    timeout-minutes: 90
+
+    steps:
+      - name: Resolve current branch and repository
+        id: context
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            BRANCH="${{ github.head_ref }}"
+          else
+            BRANCH="${GITHUB_REF_NAME}"
+          fi
+
+          CURRENT_REPO="${GITHUB_REPOSITORY#*/}"
+
+          if [[ "$CURRENT_REPO" == "${STARDUST_REPO}" ]]; then
+            SECOND_REPO="${NEBULA_REPO}"
+          elif [[ "$CURRENT_REPO" == "${NEBULA_REPO}" ]]; then
+            SECOND_REPO="${STARDUST_REPO}"
+          else
+            echo "Unsupported repository: $CURRENT_REPO"
+            exit 1
+          fi
+
+          echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
+          echo "current_repo=$CURRENT_REPO" >> "$GITHUB_OUTPUT"
+          echo "second_repo=$SECOND_REPO" >> "$GITHUB_OUTPUT"
+
+          echo "Current repo: $CURRENT_REPO"
+          echo "Second repo:  $SECOND_REPO"
+          echo "Branch:       $BRANCH"
+
+      - name: Checkout current repository
+        uses: actions/checkout@v4
+        with:
+          path: wrs/${{ steps.context.outputs.current_repo }}
+          fetch-depth: 0
+
+      - name: Resolve branch for second repository
+        id: second_branch
+        shell: bash
+        env:
+          CI_CROSS_REPO_TOKEN: ${{ secrets.CI_CROSS_REPO_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          SECOND_REPO="${{ steps.context.outputs.second_repo }}"
+          REQUESTED_BRANCH="${{ steps.context.outputs.branch }}"
+
+          if [[ -z "${CI_CROSS_REPO_TOKEN:-}" ]]; then
+            echo "Secret CI_CROSS_REPO_TOKEN is not set"
+            exit 1
+          fi
+
+          REMOTE_URL="https://x-access-token:${CI_CROSS_REPO_TOKEN}@github.com/${MAIN_REPO_OWNER}/${SECOND_REPO}.git"
+
+          if git ls-remote --exit-code --heads "$REMOTE_URL" "$REQUESTED_BRANCH" >/dev/null 2>&1; then
+            RESOLVED_BRANCH="$REQUESTED_BRANCH"
+            echo "✅ Found matching branch: $REQUESTED_BRANCH"
+          else
+            RESOLVED_BRANCH="master"
+            echo "⚠️ Branch not found in second repo, falling back to master"
+          fi
+
+          echo "resolved_branch=$RESOLVED_BRANCH" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout second repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.MAIN_REPO_OWNER }}/${{ steps.context.outputs.second_repo }}
+          ref: ${{ steps.second_branch.outputs.resolved_branch }}
+          path: wrs/${{ steps.context.outputs.second_repo }}
+          fetch-depth: 0
+          token: ${{ secrets.CI_CROSS_REPO_TOKEN }}
+
+      - name: Verify workspace layout
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -d "wrs/${{ env.STARDUST_REPO }}"
+          test -d "wrs/${{ env.NEBULA_REPO }}"
+          echo "✅ Workspace layout:"
+          ls -la "wrs/"
+
+      - name: Set up JDK 21 (Corretto)
+        uses: actions/setup-java@v4
+        with:
+          distribution: corretto
+          java-version: ${{ env.JAVA_VERSION }}
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Show Java and Gradle versions
+        shell: bash
+        working-directory: wrs/${{ env.STARDUST_REPO }}
+        run: |
+          set -euo pipefail
+          java -version
+          ./gradlew --version
+
+      - name: Download frontend bundles
+        shell: bash
+        working-directory: wrs/${{ env.STARDUST_REPO }}
+        env:
+          GRADLE_OPTS: -Dorg.gradle.daemon=false
+          ORG_GRADLE_PROJECT_spaceDownloadWRSFE: ${{ secrets.SPACE_DOWNLOAD_WRSFE }}
+        run: |
+          set -euo pipefail
+          # Скачиваем frontend bundles если токен задан
+          # Для test-проектов этот шаг пропускается автоматически
+          if [[ -n "${ORG_GRADLE_PROJECT_spaceDownloadWRSFE:-}" ]]; then
+            ./gradlew updateFrontendNebula updateFrontendStardust || true
+          else
+            echo "⚠️ SPACE_DOWNLOAD_WRSFE not set — skipping frontend download"
+          fi
+
+      - name: Run tests from stardust
+        shell: bash
+        working-directory: wrs/${{ env.STARDUST_REPO }}
+        env:
+          GRADLE_OPTS: -Dorg.gradle.daemon=false
+          ORG_GRADLE_PROJECT_spaceDownloadWRSFE: ${{ secrets.SPACE_DOWNLOAD_WRSFE }}
+        run: |
+          set -euo pipefail
+          ./gradlew test --stacktrace
+
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-reports-${{ github.run_id }}
+          retention-days: 14
+          path: |
+            wrs/${{ env.STARDUST_REPO }}/**/build/test-results/**
+            wrs/${{ env.STARDUST_REPO }}/**/build/reports/tests/**
+            wrs/${{ env.STARDUST_REPO }}/**/build/reports/problems/**
