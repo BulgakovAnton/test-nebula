@@ -15,7 +15,7 @@ concurrency:
 
 env:
   JAVA_VERSION: '21'
-  MAIN_REPO_OWNER: borlander
+  MAIN_REPO_OWNER: BulgakovAnton
   STARDUST_REPO: test-stardust
   NEBULA_REPO: test-nebula
 
