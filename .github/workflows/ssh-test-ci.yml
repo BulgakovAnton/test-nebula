@@ -1,4 +1,4 @@
-name: CI / Writerside Tests ssh
+name: CI / Writerside Tests
 
 on:
   push:
@@ -15,9 +15,9 @@ concurrency:
 
 env:
   JAVA_VERSION: '21'
-  MAIN_REPO_OWNER: BulgakovAnton
-  STARDUST_REPO: test-stardust
-  NEBULA_REPO: test-nebula
+  MAIN_REPO_OWNER: BulgakovAnton   # ← заменить на borlander
+  STARDUST_REPO: test-stardust     # ← заменить на stardust
+  NEBULA_REPO: test-nebula         # ← заменить на nebula
 
 jobs:
   tests:
@@ -91,10 +91,6 @@ jobs:
           ssh-keyscan github.com >> ~/.ssh/known_hosts
           chmod 644 ~/.ssh/known_hosts
 
-          # Проверяем что ключи валидны
-          ssh-keygen -l -f ~/.ssh/ci_stardust_key
-          ssh-keygen -l -f ~/.ssh/ci_nebula_key
-
           echo "✅ SSH keys configured"
 
       - name: Checkout current repository
@@ -160,8 +156,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test -d "wrs/stardust"
-          test -d "wrs/nebula"
+          test -d "wrs/${{ env.STARDUST_REPO }}"
+          test -d "wrs/${{ env.NEBULA_REPO }}"
           echo "✅ Workspace layout:"
           ls -la "wrs/"
 
@@ -176,7 +172,7 @@ jobs:
 
       - name: Show Java and Gradle versions
         shell: bash
-        working-directory: wrs/stardust
+        working-directory: wrs/${{ env.STARDUST_REPO }}
         run: |
           set -euo pipefail
           java -version
@@ -184,7 +180,7 @@ jobs:
 
       - name: Run tests
         shell: bash
-        working-directory: wrs/stardust
+        working-directory: wrs/${{ env.STARDUST_REPO }}
 #        env:
 #          GRADLE_OPTS: -Dorg.gradle.daemon=false
 #          ORG_GRADLE_PROJECT_spaceDownloadWRSFE: ${{ secrets.SPACE_DOWNLOAD_WRSFE }}
@@ -199,6 +195,6 @@ jobs:
           name: test-reports-${{ github.run_id }}
           retention-days: 14
           path: |
-            wrs/stardust/**/build/test-results/**
-            wrs/stardust/**/build/reports/tests/**
-            wrs/stardust/**/build/reports/problems/**
+            wrs/${{ env.STARDUST_REPO }}/**/build/test-results/**
+            wrs/${{ env.STARDUST_REPO }}/**/build/reports/tests/**
+            wrs/${{ env.STARDUST_REPO }}/**/build/reports/problems/**
