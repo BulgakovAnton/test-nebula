@@ -1,0 +1,146 @@
+name: Push export branch to Space
+
+on:
+  pull_request:
+    branches:
+      - master-jetforcer
+
+jobs:
+  push-to-space:
+    if: github.event.pull_request.head.ref != ''
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+      checks: read
+      pull-requests: read
+
+    env:
+      SPACE_REMOTE_NAME: space
+      SPACE_REPO_URL: git@github.com:BulgakovAnton/space-stardust.git
+
+    steps:
+      - name: Check actor is admin
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          ROLE=$(gh api repos/${{ github.repository }}/collaborators/${{ github.actor }}/permission \
+            --jq '.permission')
+          echo "Actor ${{ github.actor }} has role: $ROLE"
+          if [[ "$ROLE" != "admin" ]]; then
+            echo "❌ Only admins can push to Space"
+            exit 1
+          fi
+          echo "✅ Actor is admin"
+
+      - name: Check all required checks are green
+        env:
+          GH_TOKEN: ${{ secrets.SPACE_API_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          SHA="${{ github.event.pull_request.head.sha }}"
+          REPO="${{ github.repository }}"
+
+          echo "Checking status checks for $SHA"
+
+          for i in $(seq 1 30); do
+            CHECKS_JSON="$(gh api repos/$REPO/commits/$SHA/check-runs)"
+
+            echo "Current checks:"
+            echo "$CHECKS_JSON" | jq -r '.check_runs[] | "\(.name) | status=\(.status) | conclusion=\(.conclusion)"'
+
+            PENDING=$(echo "$CHECKS_JSON" | jq -r '
+              .check_runs[]
+              | select(.name != "push-to-space")
+              | select(.name != "Push export branch to Space")
+              | select(.name != "Sync master from Space + rebase master-jetforcer")
+              | select(.status != "completed")
+            ' | wc -l)
+
+            FAILED=$(echo "$CHECKS_JSON" | jq -r '
+              .check_runs[]
+              | select(.name != "push-to-space")
+              | select(.name != "Push export branch to Space")
+              | select(.name != "Sync master from Space + rebase master-jetforcer")
+              | select(.conclusion == "failure" or .conclusion == "cancelled" or .conclusion == "timed_out" or .conclusion == "action_required")
+            ' | wc -l)
+
+            if [[ $FAILED -gt 0 ]]; then
+              echo "❌ Some checks failed — cannot push to Space"
+              echo "$CHECKS_JSON" | jq -r '
+                .check_runs[]
+                | select(.name != "push-to-space")
+                | select(.name != "Push export branch to Space")
+                | select(.name != "Sync master from Space + rebase master-jetforcer")
+                | "\(.name): \(.conclusion)"
+              '
+              exit 1
+            fi
+
+            if [[ $PENDING -eq 0 ]]; then
+              echo "✅ All checks passed"
+              exit 0
+            fi
+
+            echo "⏳ Waiting for checks... attempt $i/30"
+            sleep 30
+          done
+
+          echo "❌ Timed out waiting for checks to complete"
+          exit 1
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Fetch export branch
+        run: |
+          set -euo pipefail
+          SOURCE_BRANCH="${{ github.head_ref }}"
+          EXPORT_BRANCH="export/${SOURCE_BRANCH}"
+          echo "Fetching export branch: $EXPORT_BRANCH"
+          git fetch origin "${EXPORT_BRANCH}:${EXPORT_BRANCH}"
+          git checkout "${EXPORT_BRANCH}"
+
+      - name: Configure git identity
+        run: |
+          git config user.name "Writerside Export Bot"
+          git config user.email "writerside-export-bot@jetbrains.space"
+
+      - name: Configure SSH
+        env:
+          SPACE_SSH_PRIVATE_KEY: ${{ secrets.SPACE_SSH_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          echo "${SPACE_SSH_PRIVATE_KEY}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan github.com >> ~/.ssh/known_hosts
+          chmod 644 ~/.ssh/known_hosts
+
+      - name: Add Space remote
+        run: |
+          set -euo pipefail
+          git remote remove "${SPACE_REMOTE_NAME}" || true
+          git remote add "${SPACE_REMOTE_NAME}" "${SPACE_REPO_URL}"
+
+      - name: Verify export branch is clean
+        run: |
+          set -euo pipefail
+          if git ls-tree -r --name-only HEAD | grep '^\.github/'; then
+            echo "❌ ERROR: .github exists in export branch — aborting"
+            exit 1
+          fi
+          echo "✅ Export branch is clean"
+
+      - name: Push export branch to Space
+        run: |
+          set -euo pipefail
+          SOURCE_BRANCH="${{ github.head_ref }}"
+          echo "Pushing to Space as branch: $SOURCE_BRANCH"
+          git push --force "${SPACE_REMOTE_NAME}" "HEAD:${SOURCE_BRANCH}"
+          echo "✅ Successfully pushed to Space"

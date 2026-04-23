@@ -129,22 +129,6 @@ jobs:
           java -version
           ./gradlew --version
 
-      - name: Download frontend bundles
-        shell: bash
-        working-directory: wrs/${{ env.STARDUST_REPO }}
-        env:
-          GRADLE_OPTS: -Dorg.gradle.daemon=false
-          ORG_GRADLE_PROJECT_spaceDownloadWRSFE: ${{ secrets.SPACE_DOWNLOAD_WRSFE }}
-        run: |
-          set -euo pipefail
-          # Скачиваем frontend bundles если токен задан
-          # Для test-проектов этот шаг пропускается автоматически
-          if [[ -n "${ORG_GRADLE_PROJECT_spaceDownloadWRSFE:-}" ]]; then
-            ./gradlew updateFrontendNebula updateFrontendStardust || true
-          else
-            echo "⚠️ SPACE_DOWNLOAD_WRSFE not set — skipping frontend download"
-          fi
-
       - name: Run tests from stardust
         shell: bash
         working-directory: wrs/${{ env.STARDUST_REPO }}
