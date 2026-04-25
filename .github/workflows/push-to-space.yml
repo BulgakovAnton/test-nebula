@@ -1,23 +1,33 @@
-name: Push export branch to Space
+name: Push nebula to Space
 
 on:
-  pull_request:
-    branches:
-      - master-jetforcer
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: "GitHub branch name (without export/ prefix)"
+        required: true
+        type: string
+
+      push_mode:
+        description: "Push mode"
+        required: true
+        default: "normal"
+        type: choice
+        options:
+          - normal
+          - force
 
 jobs:
-  push-to-space:
-    if: github.event.pull_request.head.ref != ''
+  pre-check:
+    name: Check permissions and CI status
     runs-on: ubuntu-latest
 
     permissions:
-      contents: write
+      contents: read
       checks: read
-      pull-requests: read
 
     env:
-      SPACE_REMOTE_NAME: space
-      SPACE_REPO_URL: git@github.com:BulgakovAnton/space-nebula.git
+      SOURCE_BRANCH: ${{ inputs.branch }}
 
     steps:
       - name: Check actor is admin
@@ -25,14 +35,36 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          ROLE=$(gh api repos/${{ github.repository }}/collaborators/${{ github.actor }}/permission \
+
+          ROLE=$(gh api "repos/${{ github.repository }}/collaborators/${{ github.actor }}/permission" \
             --jq '.permission')
+
           echo "Actor ${{ github.actor }} has role: $ROLE"
+
           if [[ "$ROLE" != "admin" ]]; then
             echo "❌ Only admins can push to Space"
             exit 1
           fi
+
           echo "✅ Actor is admin"
+
+      - name: Resolve branch SHA
+        id: resolve-sha
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          # Verify branch exists and get its SHA
+          BRANCH_JSON=$(gh api "repos/${{ github.repository }}/branches/${SOURCE_BRANCH}" 2>&1) || {
+            echo "❌ Branch '${SOURCE_BRANCH}' not found in GitHub"
+            exit 1
+          }
+
+          SHA=$(echo "$BRANCH_JSON" | jq -r '.commit.sha')
+          echo "Branch: $SOURCE_BRANCH"
+          echo "SHA: $SHA"
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
 
       - name: Check all required checks are green
         env:
@@ -40,70 +72,120 @@ jobs:
         run: |
           set -euo pipefail
 
-          SHA="${{ github.event.pull_request.head.sha }}"
+          SHA="${{ steps.resolve-sha.outputs.sha }}"
           REPO="${{ github.repository }}"
 
-          echo "Checking status checks for $SHA"
+          # Names of this workflow's own jobs — excluded from the check
+          SELF_NAMES=(
+            "Push nebula to Space"
+            "Check permissions and CI status"
+            "Push export branch to Space"
+          )
 
+          # Build jq filter to exclude self jobs
+          JQ_EXCLUDES=""
+          for name in "${SELF_NAMES[@]}"; do
+            JQ_EXCLUDES+=" | select(.name != \"$name\")"
+          done
+
+          echo "Checking CI status for SHA: $SHA"
+
+          # Wait up to 15 minutes for in-progress checks
           for i in $(seq 1 30); do
-            CHECKS_JSON="$(gh api repos/$REPO/commits/$SHA/check-runs)"
+            CHECKS_JSON=$(gh api "repos/$REPO/commits/$SHA/check-runs" --paginate)
 
-            echo "Current checks:"
-            echo "$CHECKS_JSON" | jq -r '.check_runs[] | "\(.name) | status=\(.status) | conclusion=\(.conclusion)"'
+            echo "--- Attempt $i/30 ---"
+            echo "$CHECKS_JSON" | jq -r \
+              '.check_runs[] | "\(.name) | status=\(.status) | conclusion=\(.conclusion)"'
 
-            PENDING=$(echo "$CHECKS_JSON" | jq -r '
-              .check_runs[]
-              | select(.name != "push-to-space")
-              | select(.name != "Push export branch to Space")
-              | select(.name != "Sync master from Space + rebase master-jetforcer")
-              | select(.status != "completed")
-            ' | wc -l)
+            FAILED=$(echo "$CHECKS_JSON" | jq -r \
+              ".check_runs[] ${JQ_EXCLUDES}
+               | select(.conclusion == \"failure\"
+                     or .conclusion == \"cancelled\"
+                     or .conclusion == \"timed_out\"
+                     or .conclusion == \"action_required\")" \
+              | wc -l)
 
-            FAILED=$(echo "$CHECKS_JSON" | jq -r '
-              .check_runs[]
-              | select(.name != "push-to-space")
-              | select(.name != "Push export branch to Space")
-              | select(.name != "Sync master from Space + rebase master-jetforcer")
-              | select(.conclusion == "failure" or .conclusion == "cancelled" or .conclusion == "timed_out" or .conclusion == "action_required")
-            ' | wc -l)
+            PENDING=$(echo "$CHECKS_JSON" | jq -r \
+              ".check_runs[] ${JQ_EXCLUDES}
+               | select(.status != \"completed\")" \
+              | wc -l)
 
-            if [[ $FAILED -gt 0 ]]; then
-              echo "❌ Some checks failed — cannot push to Space"
-              echo "$CHECKS_JSON" | jq -r '
-                .check_runs[]
-                | select(.name != "push-to-space")
-                | select(.name != "Push export branch to Space")
-                | select(.name != "Sync master from Space + rebase master-jetforcer")
-                | "\(.name): \(.conclusion)"
-              '
+            if [[ "$FAILED" -gt 0 ]]; then
+              echo ""
+              echo "❌ Some checks failed — cannot push to Space:"
+              echo "$CHECKS_JSON" | jq -r \
+                ".check_runs[] ${JQ_EXCLUDES}
+                 | select(.conclusion == \"failure\"
+                       or .conclusion == \"cancelled\"
+                       or .conclusion == \"timed_out\"
+                       or .conclusion == \"action_required\")
+                 | \"  • \(.name): \(.conclusion)\""
               exit 1
             fi
 
-            if [[ $PENDING -eq 0 ]]; then
+            if [[ "$PENDING" -eq 0 ]]; then
+              echo ""
               echo "✅ All checks passed"
               exit 0
             fi
 
-            echo "⏳ Waiting for checks... attempt $i/30"
+            echo "⏳ $PENDING check(s) still running, waiting 30s... (attempt $i/30)"
             sleep 30
           done
 
-          echo "❌ Timed out waiting for checks to complete"
+          echo "❌ Timed out waiting for checks to complete (15 min)"
           exit 1
 
+  push:
+    name: Push export branch to Space (nebula)
+    needs: pre-check
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+
+    env:
+      SPACE_REMOTE_NAME: space
+      SPACE_REPO_URL: git@github.com:BulgakovAnton/space-nebula.git
+      SOURCE_BRANCH: ${{ inputs.branch }}
+      EXPORT_BRANCH: export/${{ inputs.branch }}
+      PUSH_MODE: ${{ inputs.push_mode }}
+
+    steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Fetch export branch
+      - name: Verify export branch exists and fetch it
         run: |
           set -euo pipefail
-          SOURCE_BRANCH="${{ github.head_ref }}"
-          EXPORT_BRANCH="export/${SOURCE_BRANCH}"
-          echo "Fetching export branch: $EXPORT_BRANCH"
+
+          echo "Checking export branch: $EXPORT_BRANCH"
+
+          # Explicit check before fetch — gives a clear error message
+          if ! git ls-remote --exit-code origin "refs/heads/${EXPORT_BRANCH}" > /dev/null 2>&1; then
+            echo "❌ Export branch '${EXPORT_BRANCH}' does not exist in origin"
+            echo "   Make sure the Writerside export workflow has run for branch '${SOURCE_BRANCH}'"
+            exit 1
+          fi
+
           git fetch origin "${EXPORT_BRANCH}:${EXPORT_BRANCH}"
           git checkout "${EXPORT_BRANCH}"
+          echo "✅ Checked out export branch: $EXPORT_BRANCH"
+
+      - name: Verify export branch is clean (no .github/)
+        run: |
+          set -euo pipefail
+
+          if git ls-tree -r --name-only HEAD | grep -q '^\.github/'; then
+            echo "❌ .github/ directory found in export branch — aborting"
+            echo "   This should never happen. Check the export workflow."
+            exit 1
+          fi
+
+          echo "✅ Export branch is clean"
 
       - name: Configure git identity
         run: |
@@ -112,35 +194,43 @@ jobs:
 
       - name: Configure SSH
         env:
-          SPACE_SSH_PRIVATE_KEY: ${{ secrets.SPACE_SSH_PRIVATE_KEY }}
+          SPACE_SSH_PRIVATE_KEY: ${{ secrets.SPACE_SSH_PRIVATE_KEY_NEBULA }}
         run: |
           set -euo pipefail
+
           mkdir -p ~/.ssh
           chmod 700 ~/.ssh
+
           echo "${SPACE_SSH_PRIVATE_KEY}" > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
+
           ssh-keyscan github.com >> ~/.ssh/known_hosts
           chmod 644 ~/.ssh/known_hosts
 
       - name: Add Space remote
         run: |
           set -euo pipefail
-          git remote remove "${SPACE_REMOTE_NAME}" || true
-          git remote add "${SPACE_REMOTE_NAME}" "${SPACE_REPO_URL}"
 
-      - name: Verify export branch is clean
-        run: |
-          set -euo pipefail
-          if git ls-tree -r --name-only HEAD | grep '^\.github/'; then
-            echo "❌ ERROR: .github exists in export branch — aborting"
-            exit 1
-          fi
-          echo "✅ Export branch is clean"
+          git remote remove "${SPACE_REMOTE_NAME}" 2>/dev/null || true
+          git remote add "${SPACE_REMOTE_NAME}" "${SPACE_REPO_URL}"
+          echo "Remote added: ${SPACE_REPO_URL}"
 
       - name: Push export branch to Space
         run: |
           set -euo pipefail
-          SOURCE_BRANCH="${{ github.head_ref }}"
-          echo "Pushing to Space as branch: $SOURCE_BRANCH"
-          git push --force "${SPACE_REMOTE_NAME}" "HEAD:${SOURCE_BRANCH}"
-          echo "✅ Successfully pushed to Space"
+
+          echo "Source branch : $SOURCE_BRANCH"
+          echo "Export branch : $EXPORT_BRANCH"
+          echo "Push mode     : $PUSH_MODE"
+          echo "Target repo   : $SPACE_REPO_URL"
+          echo ""
+
+          if [[ "$PUSH_MODE" == "force" ]]; then
+            echo "⚠️  Force push requested"
+            git push --force "${SPACE_REMOTE_NAME}" "HEAD:${SOURCE_BRANCH}"
+          else
+            git push "${SPACE_REMOTE_NAME}" "HEAD:${SOURCE_BRANCH}"
+          fi
+
+          echo ""
+          echo "✅ Successfully pushed '${SOURCE_BRANCH}' to Space (nebula)"
